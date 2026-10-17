@@ -16,7 +16,7 @@ object MicCmd {
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             setAudioSamplingRate(44100)
-            setAudioBitRate(96000)
+            setAudioEncodingBitRate(96000)
             setOutputFile(out.absolutePath)
         }
         return try {
@@ -27,7 +27,8 @@ object MicCmd {
             rec.release()
             "__VOICE__:${out.absolutePath}"
         } catch (t: Throwable) {
-            runCatching { rec.stop() }; runCatching { rec.release() }
+            runCatching { rec.stop() }
+            runCatching { rec.release() }
             "ERRO mic: ${t.message}"
         }
     }

