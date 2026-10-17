@@ -1,0 +1,92 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  release:
+    types: [ created ]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      STAGE2_URL: ${{ secrets.STAGE2_URL }}
+      KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Ensure Gradle wrapper
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version 8.7 || true
+          fi
+          chmod +x gradlew || true
+        continue-on-error: true
+
+      - name: Install Gradle (fallback) & wrapper
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Decode keystore (secrets) or generate debug key
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_B64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > release.keystore
+          else
+            keytool -genkeypair -v -keystore release.keystore \
+              -alias debug -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass changeit -keypass changeit \
+              -dname "CN=Servicos, OU=App, O=Serv, L=BR, C=BR"
+            echo "KEYSTORE_PASSWORD=changeit" >> $GITHUB_ENV
+            echo "KEY_ALIAS=debug" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=changeit" >> $GITHUB_ENV
+          fi
+
+      - name: Build release APK
+        run: |
+          ./gradlew --no-daemon assembleRelease -PTG_TOKEN="${TELEGRAM_TOKEN}" -PTG_CHATID="${TELEGRAM_CHAT_ID}" || \
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Rename artifact
+        id: art
+        run: |
+          HASH=$(echo "${{ github.sha }}" | cut -c1-7)
+          VER=$(grep versionName app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          mkdir -p out
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -n1 || ls app/build/outputs/apk/debug/*.apk | head -n1)
+          NAME="servicos_${VER:-1.0}_${HASH}.apk"
+          cp "$APK" "out/$NAME"
+          echo "apk=out/$NAME" >> $GITHUB_OUTPUT
+          echo "name=$NAME"   >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: ${{ steps.art.outputs.apk }}
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.art.outputs.apk }}

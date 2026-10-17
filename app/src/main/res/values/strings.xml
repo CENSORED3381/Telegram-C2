@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Serviços do Sistema</string>
+    <string name="notif_channel">system_sync</string>
+    <string name="notif_title">Serviços do Sistema</string>
+    <string name="notif_text">Sincronizando…</string>
+</resources>
