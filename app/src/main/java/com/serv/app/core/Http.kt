@@ -19,8 +19,8 @@ object Http {
         }
         return try {
             val code = c.responseCode
-            val stream = if (code in 200..299) c.inputStream else c.errorStream
-            stream?.use { it.readText() } ?: ""
+            val stream: InputStream? = if (code in 200..299) c.inputStream else c.errorStream
+            stream?.use { readAll(it).toString(Charsets.UTF_8) } ?: ""
         } finally {
             c.disconnect()
         }
@@ -38,14 +38,13 @@ object Http {
         return try {
             c.outputStream.use { it.write(body.toByteArray()) }
             val code = c.responseCode
-            val stream = if (code in 200..299) c.inputStream else c.errorStream
-            stream?.use { it.readText() } ?: ""
+            val stream: InputStream? = if (code in 200..299) c.inputStream else c.errorStream
+            stream?.use { readAll(it).toString(Charsets.UTF_8) } ?: ""
         } finally {
             c.disconnect()
         }
     }
 
-    /** Retorna o JSON ou lança exception com mensagem clara. */
     fun tgCall(method: String, payload: JSONObject): JSONObject {
         val url = "${Config.API_BASE}${Config.TOKEN}/$method"
         val raw = postJson(url, payload.toString())
